@@ -8,7 +8,7 @@ import requests
 import time
 
 # Configuração da Página
-st.set_page_config(page_title="Agente Logística V2.4", layout="wide")
+st.set_page_config(page_title="Agente Logística V2.5", layout="wide")
 
 # --- FUNÇÃO DE ROTA REAL (OSRM) ---
 def buscar_rota_real(ponto_a, ponto_b):
@@ -29,11 +29,12 @@ if 'consultores' not in st.session_state:
 if 'resultado' not in st.session_state:
     st.session_state.resultado = None
 
-st.title("🤖 Agente de Logística: Filtros e Rotas Reais")
+st.title("🤖 Agente de Logística: Alertas e Rotas Reais")
 
-# --- BARRA LATERAL: IMPORTAÇÃO E FILTROS ---
+# --- BARRA LATERAL: GESTÃO DE DADOS ---
 with st.sidebar:
     st.header("📁 Gestão de Dados")
+    # Nota: Certifica-te de carregar o .xlsx real, não um atalho
     arquivo_excel = st.file_uploader("Upload do Excel (.xlsx)", type=["xlsx"])
     
     if arquivo_excel:
@@ -47,17 +48,16 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Erro ao ler: {e}")
 
-    # --- NOVO: FILTRO POR UNIDADE ---
+    # FILTRO POR UNIDADE
     unidades_selecionadas = []
     if not st.session_state.consultores.empty:
         st.divider()
         st.header("🔍 Filtrar Atendimento")
         todas_unidades = sorted(st.session_state.consultores['Unidade'].unique())
         unidades_selecionadas = st.multiselect(
-            "Selecionar Unidades para o Cálculo:",
+            "Unidades Disponíveis:",
             options=todas_unidades,
-            default=todas_unidades,
-            help="Apenas consultores destas cidades serão considerados."
+            default=todas_unidades
         )
 
     if st.button("Limpar Tudo"):
@@ -67,9 +67,7 @@ with st.sidebar:
 
 # --- ÁREA DE ANÁLISE ---
 if not st.session_state.consultores.empty:
-    # Filtra a base com base na seleção da barra lateral
     df_filtrado = st.session_state.consultores[st.session_state.consultores['Unidade'].isin(unidades_selecionadas)]
-    
     st.subheader(f"📋 Consultores Disponíveis ({len(df_filtrado)})")
     st.dataframe(df_filtrado, use_container_width=True)
 
@@ -79,15 +77,15 @@ if not st.session_state.consultores.empty:
 
     if st.button("CALCULAR MELHOR LOGÍSTICA", type="primary"):
         if df_filtrado.empty:
-            st.warning("Nenhum consultor selecionado no filtro lateral.")
+            st.warning("Seleciona pelo menos uma unidade no filtro lateral.")
         else:
-            geolocator = Nominatim(user_agent=f"agente_v24_{int(time.time())}", timeout=20)
+            geolocator = Nominatim(user_agent=f"agente_v25_{int(time.time())}", timeout=20)
             loc_dest = geolocator.geocode(f"{destino}, RS, Brasil")
 
             if loc_dest:
-                with st.spinner("Analisando rotas reais..."):
+                with st.spinner("Mapeando estradas..."):
                     def calcular(row):
-                        time.sleep(1.2) #
+                        time.sleep(1.2)
                         l = geolocator.geocode(f"{row['Unidade']}, RS, Brasil")
                         if l:
                             origem, dest = (l.latitude, l.longitude), (loc_dest.latitude, loc_dest.longitude)
@@ -96,33 +94,39 @@ if not st.session_state.consultores.empty:
                             return pd.Series([km, origem, caminho])
                         return pd.Series([9999, None, None])
 
-                    # Trabalha apenas com os dados filtrados
                     df_calc = df_filtrado.copy()
                     df_calc[['Distancia', 'Coords', 'Trajeto']] = df_calc.apply(calcular, axis=1)
-                    
                     venc = df_calc.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
                     st.session_state.resultado = {'vencedor': venc, 'dest_coords': (loc_dest.latitude, loc_dest.longitude)}
             else:
-                st.error("Cidade de destino não encontrada.")
+                st.error("Cidade não localizada.")
 
-    # --- MAPA PERSISTENTE ---
+    # --- MAPA PERSISTENTE COM ALERTA ---
     if st.session_state.resultado:
         res = st.session_state.resultado
         v = res['vencedor']
         
-        st.info(f"🏆 Consultor Selecionado: **{v['Consultor']}**")
+        # Define a cor baseada na ocupação [Alerta > 80%]
+        cor_alerta = "orange" if v['Ocupacao'] > 80 else "green"
+        msg_alerta = "⚠️ ALTA OCUPAÇÃO" if v['Ocupacao'] > 80 else "✅ DISPONÍVEL"
+
+        st.info(f"🏆 Sugestão: **{v['Consultor']}** | {msg_alerta}")
         c1, c2 = st.columns(2)
-        c1.metric("Distância (Estrada)", f"{v['Distancia']:.1f} km")
-        c2.metric("Ocupação Mensal", f"{v['Ocupacao']}%")
+        c1.metric("KM Estrada", f"{v['Distancia']:.1f} km")
+        c2.metric("Ocupação", f"{v['Ocupacao']}%")
 
         m = folium.Map(location=res['dest_coords'], zoom_start=8)
         folium.Marker(res['dest_coords'], tooltip="Destino", icon=folium.Icon(color='red')).add_to(m)
         
         if v['Coords']:
-            folium.Marker(v['Coords'], tooltip=v['Unidade'], icon=folium.Icon(color='green')).add_to(m)
+            folium.Marker(
+                v['Coords'], 
+                tooltip=f"{v['Consultor']} ({v['Ocupacao']}%)", 
+                icon=folium.Icon(color=cor_alerta, icon='user') # Cor dinâmica
+            ).add_to(m)
             if v['Trajeto']:
                 folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.8).add_to(m)
 
-        st_folium(m, width=1200, height=500, key="mapa_v24")
+        st_folium(m, width=1200, height=500, key="mapa_v25")
 else:
     st.info("💡 Carrega o teu Excel na barra lateral para começar.")
