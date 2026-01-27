@@ -6,9 +6,10 @@ import folium
 from streamlit_folium import st_folium
 import requests
 import time
+from datetime import datetime
 
 # Configuração da Página
-st.set_page_config(page_title="Agente Logística V2.5", layout="wide")
+st.set_page_config(page_title="Agente Logística V2.6", layout="wide")
 
 # --- FUNÇÃO DE ROTA REAL (OSRM) ---
 def buscar_rota_real(ponto_a, ponto_b):
@@ -29,91 +30,89 @@ if 'consultores' not in st.session_state:
 if 'resultado' not in st.session_state:
     st.session_state.resultado = None
 
-st.title("🤖 Agente de Logística: Alertas e Rotas Reais")
+st.title("🤖 Agente de Logística: Inteligência Mensal V2.6")
 
-# --- BARRA LATERAL: GESTÃO DE DADOS ---
+# --- BARRA LATERAL: IMPORTAÇÃO ---
 with st.sidebar:
     st.header("📁 Gestão de Dados")
-    # Nota: Certifica-te de carregar o .xlsx real, não um atalho
-    arquivo_excel = st.file_uploader("Upload do Excel (.xlsx)", type=["xlsx"])
+    arquivo_excel = st.file_uploader("Carregar Excel (.xlsx)", type=["xlsx"])
     
     if arquivo_excel:
         try:
-            df_excel = pd.read_excel(arquivo_excel)
-            colunas_esperadas = ['Consultor', 'Unidade', 'Ocupacao']
-            if all(col in df_excel.columns for col in colunas_esperadas):
-                st.session_state.consultores = df_excel[colunas_esperadas]
+            df_temp = pd.read_excel(arquivo_excel)
+            # Mapeamento automático do mês atual
+            meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
+                        7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
+            mes_atual = meses_pt[datetime.now().month]
+            
+            if 'Consultor' in df_temp.columns and 'Unidade' in df_temp.columns:
+                # Se a coluna do mês existir, usamos ela como 'Ocupacao'
+                if mes_atual in df_temp.columns:
+                    df_temp['Ocupacao'] = df_temp[mes_atual]
+                    # Converte percentagem (ex: 52,38%) para número se necessário
+                    if df_temp['Ocupacao'].dtype == object:
+                        df_temp['Ocupacao'] = df_temp['Ocupacao'].str.replace('%','').str.replace(',','.').astype(float)
+                else:
+                    st.warning(f"Coluna '{mes_atual}' não encontrada. Usando 0% por defeito.")
+                    df_temp['Ocupacao'] = 0
+                
+                st.session_state.consultores = df_temp[['Consultor', 'Unidade', 'Ocupacao']]
+                st.success(f"Dados de {mes_atual} carregados!")
             else:
-                st.error(f"O Excel deve ter: {colunas_esperadas}")
+                st.error("O Excel deve conter as colunas 'Consultor' e 'Unidade'.")
         except Exception as e:
-            st.error(f"Erro ao ler: {e}")
-
-    # FILTRO POR UNIDADE
-    unidades_selecionadas = []
-    if not st.session_state.consultores.empty:
-        st.divider()
-        st.header("🔍 Filtrar Atendimento")
-        todas_unidades = sorted(st.session_state.consultores['Unidade'].unique())
-        unidades_selecionadas = st.multiselect(
-            "Unidades Disponíveis:",
-            options=todas_unidades,
-            default=todas_unidades
-        )
+            st.error(f"Erro ao ler ficheiro: {e}")
 
     if st.button("Limpar Tudo"):
         st.session_state.consultores = pd.DataFrame()
         st.session_state.resultado = None
         st.rerun()
 
-# --- ÁREA DE ANÁLISE ---
+# --- ÁREA DE CÁLCULO ---
 if not st.session_state.consultores.empty:
-    df_filtrado = st.session_state.consultores[st.session_state.consultores['Unidade'].isin(unidades_selecionadas)]
-    st.subheader(f"📋 Consultores Disponíveis ({len(df_filtrado)})")
-    st.dataframe(df_filtrado, use_container_width=True)
+    df = st.session_state.consultores.copy()
+    st.subheader("📋 Ocupação da Equipa (Mês Atual)")
+    st.dataframe(df, use_container_width=True)
 
     st.divider()
-    st.subheader("📍 Definir Destino")
-    destino = st.text_input("Cidade de Destino (Ex: Xangri-la):")
+    destino = st.text_input("📍 Cidade de Destino (Ex: Caxias do Sul):")
 
     if st.button("CALCULAR MELHOR LOGÍSTICA", type="primary"):
-        if df_filtrado.empty:
-            st.warning("Seleciona pelo menos uma unidade no filtro lateral.")
+        geolocator = Nominatim(user_agent=f"agente_v26_{int(time.time())}", timeout=20)
+        loc_dest = geolocator.geocode(f"{destino}, RS, Brasil")
+
+        if loc_dest:
+            with st.spinner("A traçar rotas reais..."):
+                def calcular(row):
+                    time.sleep(1.2) # Segurança API
+                    l = geolocator.geocode(f"{row['Unidade']}, RS, Brasil")
+                    if l:
+                        origem, dest_coords = (l.latitude, l.longitude), (loc_dest.latitude, loc_dest.longitude)
+                        caminho, km = buscar_rota_real(origem, dest_coords)
+                        if not km: km = geodesic(origem, dest_coords).km
+                        return pd.Series([km, origem, caminho])
+                    return pd.Series([9999, None, None])
+
+                df[['Distancia', 'Coords', 'Trajeto']] = df.apply(calcular, axis=1)
+                # Lógica: Menor Ocupação -> Menor Distância
+                venc = df.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
+                st.session_state.resultado = {'vencedor': venc, 'dest_coords': (loc_dest.latitude, loc_dest.longitude)}
         else:
-            geolocator = Nominatim(user_agent=f"agente_v25_{int(time.time())}", timeout=20)
-            loc_dest = geolocator.geocode(f"{destino}, RS, Brasil")
+            st.error("Destino não localizado.")
 
-            if loc_dest:
-                with st.spinner("Mapeando estradas..."):
-                    def calcular(row):
-                        time.sleep(1.2)
-                        l = geolocator.geocode(f"{row['Unidade']}, RS, Brasil")
-                        if l:
-                            origem, dest = (l.latitude, l.longitude), (loc_dest.latitude, loc_dest.longitude)
-                            caminho, km = buscar_rota_real(origem, dest)
-                            if not km: km = geodesic(origem, dest).km
-                            return pd.Series([km, origem, caminho])
-                        return pd.Series([9999, None, None])
-
-                    df_calc = df_filtrado.copy()
-                    df_calc[['Distancia', 'Coords', 'Trajeto']] = df_calc.apply(calcular, axis=1)
-                    venc = df_calc.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
-                    st.session_state.resultado = {'vencedor': venc, 'dest_coords': (loc_dest.latitude, loc_dest.longitude)}
-            else:
-                st.error("Cidade não localizada.")
-
-    # --- MAPA PERSISTENTE COM ALERTA ---
+    # --- MAPA COM ALERTA DE OCUPAÇÃO (>80%) ---
     if st.session_state.resultado:
         res = st.session_state.resultado
         v = res['vencedor']
         
-        # Define a cor baseada na ocupação [Alerta > 80%]
-        cor_alerta = "orange" if v['Ocupacao'] > 80 else "green"
-        msg_alerta = "⚠️ ALTA OCUPAÇÃO" if v['Ocupacao'] > 80 else "✅ DISPONÍVEL"
+        # Alerta Laranja para ocupação alta
+        cor_pino = "orange" if v['Ocupacao'] > 80 else "green"
+        aviso = "⚠️ OCUPAÇÃO ALTA" if v['Ocupacao'] > 80 else "✅ DISPONÍVEL"
 
-        st.info(f"🏆 Sugestão: **{v['Consultor']}** | {msg_alerta}")
+        st.info(f"🏆 Sugestão: **{v['Consultor']}** | {aviso}")
         c1, c2 = st.columns(2)
-        c1.metric("KM Estrada", f"{v['Distancia']:.1f} km")
-        c2.metric("Ocupação", f"{v['Ocupacao']}%")
+        c1.metric("Distância Real", f"{v['Distancia']:.1f} km")
+        c2.metric("Ocupação", f"{v['Ocupacao']:.1f}%")
 
         m = folium.Map(location=res['dest_coords'], zoom_start=8)
         folium.Marker(res['dest_coords'], tooltip="Destino", icon=folium.Icon(color='red')).add_to(m)
@@ -122,11 +121,11 @@ if not st.session_state.consultores.empty:
             folium.Marker(
                 v['Coords'], 
                 tooltip=f"{v['Consultor']} ({v['Ocupacao']}%)", 
-                icon=folium.Icon(color=cor_alerta, icon='user') # Cor dinâmica
+                icon=folium.Icon(color=cor_pino, icon='user')
             ).add_to(m)
             if v['Trajeto']:
-                folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.8).add_to(m)
+                folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.7).add_to(m)
 
-        st_folium(m, width=1200, height=500, key="mapa_v25")
+        st_folium(m, width=1200, height=500, key="mapa_final_v26")
 else:
-    st.info("💡 Carrega o teu Excel na barra lateral para começar.")
+    st.info("💡 Arraste o seu ficheiro Excel (.xlsx) para a barra lateral para começar.")
