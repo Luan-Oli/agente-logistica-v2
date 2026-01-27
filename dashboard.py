@@ -4,114 +4,127 @@ from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import folium
 from streamlit_folium import st_folium
+import requests
 import time
 
-# Configuração da página para ocupar a tela inteira
-st.set_page_config(page_title="Agente Logística V2", layout="wide")
+# Configuração da Página
+st.set_page_config(page_title="Agente de Logística V2.1", layout="wide")
 
-# --- MEMÓRIA DO SITE (Session State) ---
-# Isso impede que o mapa suma após o clique
-if 'lista_consultores' not in st.session_state:
-    st.session_state.lista_consultores = []
-if 'resultado_vencedor' not in st.session_state:
-    st.session_state.resultado_vencedor = None
-if 'mapa_data' not in st.session_state:
-    st.session_state.mapa_data = None
+# --- FUNÇÃO DE ROTA REAL (OSRM) ---
+def buscar_rota_real(ponto_a, ponto_b):
+    """Retorna o caminho pelas estradas e a distância real em KM"""
+    # OSRM usa [Longitude, Latitude]
+    url = f"http://router.project-osrm.org/route/v1/driving/{ponto_a[1]},{ponto_a[0]};{ponto_b[1]},{ponto_b[0]}?overview=full&geometries=geojson"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if data['code'] == 'Ok':
+            # Inverte para [Lat, Lon] para o Folium
+            rota = [[p[1], p[0]] for p in data['routes'][0]['geometry']['coordinates']]
+            distancia = data['routes'][0]['distance'] / 1000
+            return rota, distancia
+    except:
+        return None, None
 
-st.title("🤖 Agente de Logística: Painel de Atendimento")
+# --- INICIALIZAÇÃO DE MEMÓRIA (Session State) ---
+# Garante que os dados e o mapa não sumam após cliques
+if 'consultores' not in st.session_state:
+    st.session_state.consultores = []
+if 'resultado' not in st.session_state:
+    st.session_state.resultado = None
 
-# --- BARRA LATERAL: CADASTRO ---
+st.title("🤖 Agente de Logística: Rotas Reais e Ocupação")
+
+# --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("👥 Gestão de Equipe")
-    with st.form("cadastro_consultor"):
-        nome = st.text_input("Nome do Consultor")
+    st.header("👥 Gestão de Consultores")
+    with st.form("add_consultor"):
+        nome = st.text_input("Nome")
         unidade = st.text_input("Cidade da Unidade (Ex: Bento Gonçalves)")
         ocupacao = st.slider("Ocupação Atual (%)", 0, 100, 20)
-        btn_add = st.form_submit_button("Adicionar Consultor")
+        if st.form_submit_button("Adicionar"):
+            st.session_state.consultores.append({"Consultor": nome, "Unidade": unidade, "Ocupacao": ocupacao})
+            st.rerun()
 
-    if btn_add and nome and unidade:
-        st.session_state.lista_consultores.append({
-            "Consultor": nome, "Unidade": unidade, "Ocupação": ocupacao
-        })
-        st.success(f"{nome} adicionado!")
-
-    if st.button("Limpar Lista de Consultores"):
-        st.session_state.lista_consultores = []
-        st.session_state.resultado_vencedor = None
-        st.session_state.mapa_data = None
+    if st.button("Limpar Tudo"):
+        st.session_state.consultores = []
+        st.session_state.resultado = None
         st.rerun()
 
-# --- ÁREA DE CÁLCULO ---
-if st.session_state.lista_consultores:
-    df = pd.DataFrame(st.session_state.lista_consultores)
-    st.subheader("📋 Consultores Disponíveis")
+# --- ÁREA PRINCIPAL ---
+if st.session_state.consultores:
+    df = pd.DataFrame(st.session_state.consultores)
+    st.subheader("📋 Consultores na Base")
     st.dataframe(df, use_container_width=True)
 
     st.divider()
     st.subheader("📍 Novo Atendimento")
-    cidade_destino = st.text_input("Informe a Cidade de Destino (Ex: Xangri-la):")
+    destino = st.text_input("Cidade de Destino (Ex: Xangri-la):")
 
-    if st.button("CALCULAR MELHOR ROTA", type="primary"):
-        # Evita o erro 403 Forbidden usando um nome único
-        user_agent_unico = f"agente_logistica_luan_{int(time.time())}"
-        geolocator = Nominatim(user_agent=user_agent_unico, timeout=20)
-        
-        loc_dest = geolocator.geocode(f"{cidade_destino}, RS, Brasil")
+    if st.button("CALCULAR MELHOR LOGÍSTICA", type="primary"):
+        # Evita Erro 403 Forbidden
+        geolocator = Nominatim(user_agent=f"agente_luan_{int(time.time())}", timeout=20)
+        loc_dest = geolocator.geocode(f"{destino}, RS, Brasil")
 
         if loc_dest:
-            with st.spinner("Analisando logística..."):
-                def processar(row):
-                    time.sleep(1.2) # Pausa de segurança para o serviço de mapas
+            with st.spinner("Traçando rotas reais pelas rodovias..."):
+                def analisar(row):
+                    time.sleep(1.2) # Segurança do Geopy
                     l = geolocator.geocode(f"{row['Unidade']}, RS, Brasil")
                     if l:
-                        dist = geodesic((loc_dest.latitude, loc_dest.longitude), (l.latitude, l.longitude)).km
-                        return dist, (l.latitude, l.longitude)
-                    return 9999, None
+                        coords_unidade = (l.latitude, l.longitude)
+                        coords_destino = (loc_dest.latitude, loc_dest.longitude)
+                        
+                        # Busca a estrada real
+                        caminho, km = buscar_rota_real(coords_unidade, coords_destino)
+                        
+                        # Se falhar a rota real, usa a linear como backup
+                        if not km:
+                            km = geodesic(coords_unidade, coords_destino).km
+                        
+                        return pd.Series([km, coords_unidade, caminho])
+                    return pd.Series([9999, None, None])
 
-                res = df.apply(processar, axis=1)
-                df['Distancia'] = [r[0] for r in res]
-                df['Coords'] = [r[1] for r in res]
-
-                # LÓGICA: Menor Ocupação -> Menor Distância
-                vencedor = df.sort_values(by=['Ocupação', 'Distancia']).iloc[0]
+                df[['Distancia', 'Coords', 'Trajeto']] = df.apply(analisar, axis=1)
                 
-                # Salvando na memória para o mapa não sumir
-                st.session_state.resultado_vencedor = vencedor
-                st.session_state.mapa_data = {
-                    'dest_lat': loc_dest.latitude,
-                    'dest_lon': loc_dest.longitude,
-                    'venc_coords': vencedor['Coords']
+                # LÓGICA: Prioriza Menor Ocupação e depois Distância
+                venc = df.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
+                
+                st.session_state.resultado = {
+                    'vencedor': venc,
+                    'dest_coords': (loc_dest.latitude, loc_dest.longitude)
                 }
         else:
-            st.error("Cidade de destino não encontrada.")
+            st.error("Cidade não encontrada.")
 
-    # --- EXIBIÇÃO PERSISTENTE DO MAPA ---
-    # Esta parte fica fora do botão para o mapa não sumir
-    if st.session_state.resultado_vencedor is not None:
-        v = st.session_state.resultado_vencedor
-        d = st.session_state.mapa_data
+    # --- EXIBIÇÃO DO MAPA (PERSISTENTE) ---
+    if st.session_state.resultado:
+        res = st.session_state.resultado
+        v = res['vencedor']
+        
+        st.success(f"🏆 Sugestão: **{v['Consultor']}**")
+        col1, col2 = st.columns(2)
+        col1.metric("Distância (Estrada)", f"{v['Distancia']:.1f} km")
+        col2.metric("Ocupação", f"{v['Ocupacao']}%")
 
-        st.success(f"🏆 Melhor Opção: **{v['Consultor']}**")
-        c1, c2 = st.columns(2)
-        c1.metric("Distância", f"{v['Distancia']:.1f} km")
-        c2.metric("Ocupação", f"{v['Ocupação']}%")
-
-        # Renderização do Mapa Folium
-        m = folium.Map(location=[d['dest_lat'], d['dest_lon']], zoom_start=8)
+        # Criar Mapa Folium
+        m = folium.Map(location=res['dest_coords'], zoom_start=8)
         
         # Marcador Destino
-        folium.Marker([d['dest_lat'], d['dest_lon']], tooltip="Destino", icon=folium.Icon(color='red')).add_to(m)
+        folium.Marker(res['dest_coords'], tooltip="Cliente", icon=folium.Icon(color='red')).add_to(m)
         
-        # Marcador Unidade e Trajeto
-        if d['venc_coords']:
-            folium.Marker(d['venc_coords'], tooltip=v['Unidade'], icon=folium.Icon(color='green')).add_to(m)
-            folium.PolyLine(
-                locations=[[d['dest_lat'], d['dest_lon']], d['venc_coords']], 
-                color="blue", weight=4, opacity=0.7
-            ).add_to(m)
+        # Marcador Unidade e Rota
+        if v['Coords']:
+            folium.Marker(v['Coords'], tooltip=v['Unidade'], icon=folium.Icon(color='green')).add_to(m)
+            
+            # Se houver trajeto real, desenha a curva da estrada. Se não, linha reta.
+            if v['Trajeto']:
+                folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.8).add_to(m)
+            else:
+                folium.PolyLine([res['dest_coords'], v['Coords']], color="gray", dash_array='5').add_to(m)
 
-        # O segredo: st_folium com uma KEY fixa
-        st_folium(m, width=1200, height=500, key="mapa_persistente")
+        # st_folium com KEY fixa impede o mapa de sumir
+        st_folium(m, width=1200, height=500, key="mapa_v2")
         st.balloons()
 else:
-    st.info("💡 Adicione os consultores na barra lateral para começar.")
+    st.info("Cadastre consultores na lateral para iniciar.")
