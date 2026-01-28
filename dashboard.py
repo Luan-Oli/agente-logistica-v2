@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 
 # Configuração da Página
-st.set_page_config(page_title="Agente Logística V2.7", layout="wide")
+st.set_page_config(page_title="Agente Logística V2.8", layout="wide")
 
 # --- FUNÇÃO DE ROTA REAL (OSRM) ---
 def buscar_rota_real(ponto_a, ponto_b):
@@ -30,69 +30,94 @@ if 'consultores_base' not in st.session_state:
 if 'resultado' not in st.session_state:
     st.session_state.resultado = None
 
-st.title("🤖 Agente de Logística: Planeamento e Rotas V2.7")
+st.title("🤖 Agente de Logística: Planejamento V2.8")
 
-# --- BARRA LATERAL: GESTÃO E PLANEAMENTO ---
+# --- BARRA LATERAL: GESTÃO ---
 with st.sidebar:
     st.header("📁 Gestão de Dados")
+    # Lembre-se: Arraste o arquivo .xlsx real, não o atalho .url
     arquivo_excel = st.file_uploader("Carregar Excel (.xlsx)", type=["xlsx"])
     
     if arquivo_excel:
         try:
             st.session_state.consultores_base = pd.read_excel(arquivo_excel)
-            st.success("Excel carregado com sucesso!")
+            st.success("Excel carregado!")
         except Exception as e:
-            st.error(f"Erro ao ler ficheiro: {e}")
+            st.error(f"Erro ao ler arquivo: {e}")
 
-    # --- NOVO: SELETOR DE MÊS PARA SIMULAÇÃO ---
     mes_selecionado = None
     if not st.session_state.consultores_base.empty:
         st.divider()
-        st.header("🗓️ Planeamento")
-        
+        st.header("🗓️ Mês de Referência")
         lista_meses = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 
                        'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
-        
-        # Define o mês atual como padrão
-        mes_atual_nome = lista_meses[datetime.now().month - 1]
-        
-        mes_selecionado = st.selectbox(
-            "Selecionar Mês de Referência:",
-            options=lista_meses,
-            index=lista_meses.index(mes_atual_nome),
-            help="O sistema usará a ocupação deste mês para o cálculo."
-        )
-
-    # FILTRO POR UNIDADE
-    unidades_selecionadas = []
-    if not st.session_state.consultores_base.empty:
-        st.divider()
-        st.header("🔍 Filtrar Unidades")
-        todas_unidades = sorted(st.session_state.consultores_base['Unidade'].unique())
-        unidades_selecionadas = st.multiselect(
-            "Unidades Ativas:",
-            options=todas_unidades,
-            default=todas_unidades
-        )
+        mes_atual_idx = datetime.now().month - 1
+        mes_selecionado = st.selectbox("Selecione o mês:", options=lista_meses, index=mes_atual_idx)
 
     if st.button("Limpar Tudo"):
         st.session_state.consultores_base = pd.DataFrame()
         st.session_state.resultado = None
         st.rerun()
 
-# --- ÁREA DE PROCESSAMENTO ---
+# --- PROCESSAMENTO DOS DADOS ---
 if not st.session_state.consultores_base.empty:
     df_temp = st.session_state.consultores_base.copy()
     
-    # Validação e Limpeza da Coluna de Ocupação do Mês Selecionado
+    # Ajuste dinâmico para os dados do seu Excel
     if mes_selecionado in df_temp.columns:
-        # Trata formatos como "52,38%" para números flutuantes
+        # Converte "52,38%" (string) para 52.38 (número)
         df_temp['Ocupacao'] = df_temp[mes_selecionado].astype(str).str.replace('%', '').str.replace(',', '.').astype(float)
     else:
-        st.warning(f"A coluna '{mes_selecionado}' não existe no Excel. Ocupação definida como 0%.")
+        st.warning(f"Coluna {mes_selecionado} não encontrada.")
         df_temp['Ocupacao'] = 0.0
 
-    # Aplica filtro de unidade
-    df_filtrado = df_temp[df_temp['Unidade'].isin(unidades_selecionadas)]
-    
-    st.subheader(f"📋 Consultores Dispon
+    # FIX LINHA 98: Sintaxe corrigida para evitar o erro da imagem
+    st.subheader(f"📋 Consultores Disponíveis - {mes_selecionado}")
+    st.dataframe(df_temp[['Consultor', 'Unidade', 'Ocupacao']], use_container_width=True)
+
+    st.divider()
+    destino = st.text_input("📍 Informe a Cidade de Destino:")
+
+    if st.button("CALCULAR LOGÍSTICA", type="primary"):
+        geolocator = Nominatim(user_agent=f"agente_v28_{int(time.time())}", timeout=20)
+        loc_dest = geolocator.geocode(f"{destino}, RS, Brasil")
+
+        if loc_dest:
+            with st.spinner("Traçando rotas reais..."):
+                def analisar(row):
+                    time.sleep(1.2) # Evita erro 403
+                    l = geolocator.geocode(f"{row['Unidade']}, RS, Brasil")
+                    if l:
+                        origem = (l.latitude, l.longitude)
+                        cam, km = buscar_rota_real(origem, (loc_dest.latitude, loc_dest.longitude))
+                        if not km: km = geodesic(origem, (loc_dest.latitude, loc_dest.longitude)).km
+                        return pd.Series([km, origem, cam])
+                    return pd.Series([9999, None, None])
+
+                df_temp[['Distancia', 'Coords', 'Trajeto']] = df_temp.apply(analisar, axis=1)
+                venc = df_temp.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
+                st.session_state.resultado = {'vencedor': venc, 'dest_coords': (loc_dest.latitude, loc_dest.longitude)}
+        else:
+            st.error("Cidade não encontrada.")
+
+    # --- MAPA FINAL ---
+    if st.session_state.resultado:
+        res = st.session_state.resultado
+        v = res['vencedor']
+        cor = "orange" if v['Ocupacao'] > 80 else "green"
+
+        st.info(f"🏆 Melhor Sugestão: **{v['Consultor']}**")
+        c1, c2 = st.columns(2)
+        c1.metric("Distância Estrada", f"{v['Distancia']:.1f} km")
+        c2.metric(f"Ocupação ({mes_selecionado})", f"{v['Ocupacao']:.1f}%")
+
+        m = folium.Map(location=res['dest_coords'], zoom_start=8)
+        folium.Marker(res['dest_coords'], tooltip="Destino", icon=folium.Icon(color='red')).add_to(m)
+        if v['Coords']:
+            folium.Marker(v['Coords'], tooltip=v['Consultor'], icon=folium.Icon(color=cor, icon='user')).add_to(m)
+            if v['Trajeto']:
+                folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.7).add_to(m)
+
+        st_folium(m, width=1200, height=500, key="mapa_v28")
+else:
+    st.info("💡 Arraste o seu arquivo Excel para começar.")
