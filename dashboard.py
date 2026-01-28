@@ -9,9 +9,9 @@ import requests
 import time
 from datetime import datetime
 
-st.set_page_config(page_title="Agente Logística V3.9", layout="wide")
+st.set_page_config(page_title="Agente Logística V4.0", layout="wide")
 
-# --- FUNÇÕES DE SUPORTE (LEITURA E ROTA) ---
+# --- FUNÇÕES DE SUPORTE ---
 def carregar_excel_bruto(arquivo):
     try:
         df_raw = pd.read_excel(arquivo, header=None)
@@ -35,7 +35,7 @@ def carregar_excel_bruto(arquivo):
 def geocodificar_seguro(geolocator, endereco, tentativas=3):
     for i in range(tentativas):
         try:
-            geolocator.user_agent = f"agente_logistica_v39_{int(time.time())}_{i}"
+            geolocator.user_agent = f"agente_v40_{int(time.time())}_{i}"
             return geolocator.geocode(endereco, timeout=10)
         except (GeocoderUnavailable, GeocoderTimedOut):
             time.sleep(2)
@@ -58,7 +58,7 @@ def buscar_rota_real(ponto_a, ponto_b):
 if 'base' not in st.session_state: st.session_state.base = pd.DataFrame()
 if 'resultado' not in st.session_state: st.session_state.resultado = None
 
-st.title("🤖 Agente Logística V3.9: Status em Tempo Real")
+st.title("🤖 Agente Logística V4.0: Custos & Rotas")
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -79,6 +79,17 @@ with st.sidebar:
                        'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
         mes_atual_idx = datetime.now().month - 1
         mes_ref = st.selectbox("Mês de Referência:", options=lista_meses, index=mes_atual_idx)
+        
+        st.divider()
+        # --- NOVIDADE: CALCULADORA FINANCEIRA (Polo TSI) ---
+        st.header("🚗 Custos de Viagem")
+        st.caption("Base: Polo TSI 1.0 Turbo")
+        
+        # Padrões baseados na pesquisa (15 km/l estrada / R$ 6,35 gasolina RS)
+        preco_combustivel = st.number_input("Preço Gasolina (R$):", value=6.35, step=0.01, format="%.2f")
+        consumo_carro = st.number_input("Consumo Estrada (km/l):", value=15.0, step=0.1, format="%.1f")
+        
+        st.info(f"Custo por km: R$ {(preco_combustivel/consumo_carro):.2f}")
 
     if st.button("Limpar"):
         st.session_state.base = pd.DataFrame()
@@ -89,7 +100,6 @@ with st.sidebar:
 if not st.session_state.base.empty:
     df = st.session_state.base.copy()
 
-    # Tratamento da Coluna de Ocupação
     col_mes = None
     for c in df.columns:
         if str(c).lower() == str(mes_ref).lower():
@@ -112,51 +122,35 @@ if not st.session_state.base.empty:
     st.divider()
     destino = st.text_input("📍 Informe a Cidade do Cliente:")
 
-    if st.button("CALCULAR LOGÍSTICA", type="primary"):
-        # --- NOVIDADE: CAIXA DE STATUS (Monitor de Progresso) ---
-        with st.status("Iniciando processamento...", expanded=True) as status:
+    if st.button("CALCULAR LOGÍSTICA + CUSTOS", type="primary"):
+        with st.status("Processando logística...", expanded=True) as status:
             
-            geolocator = Nominatim(user_agent=f"agente_v39_{int(time.time())}", timeout=10)
+            geolocator = Nominatim(user_agent=f"agente_v40_{int(time.time())}", timeout=10)
             
-            # PASSO 1: Destino
-            st.write(f"🔍 Buscando localização de: **{destino}**...")
+            st.write(f"🔍 Localizando: **{destino}**...")
             loc_dest = geocodificar_seguro(geolocator, f"{destino}, RS, Brasil")
 
             if loc_dest:
-                st.write("✅ Destino encontrado!")
+                st.write("✅ Destino confirmado.")
+                st.write("🗺️ Mapeando unidades (Cache)...")
                 
-                # PASSO 2: Unidades Únicas (Cache)
-                st.write("🗺️ Mapeando unidades (Cache Inteligente)...")
                 unidades_unicas = df['Unidade'].dropna().unique()
                 coords_cache = {}
-                
-                # Barra de progresso visual
                 prog_bar = st.progress(0)
-                total_uni = len(unidades_unicas)
                 
                 for i, unidade in enumerate(unidades_unicas):
                     uni_str = str(unidade).strip()
                     if uni_str and uni_str.lower() != 'nan':
-                        # Tenta buscar a cidade
                         loc_u = geocodificar_seguro(geolocator, f"{uni_str}, RS, Brasil")
-                        if loc_u:
-                            coords_cache[uni_str] = (loc_u.latitude, loc_u.longitude)
-                        else:
-                            coords_cache[uni_str] = None
-                        time.sleep(1.1) # Pausa amigável para o servidor
-                    
-                    # Atualiza barra
-                    prog_bar.progress((i + 1) / total_uni)
+                        coords_cache[uni_str] = (loc_u.latitude, loc_u.longitude) if loc_u else None
+                        time.sleep(1.1)
+                    prog_bar.progress((i + 1) / len(unidades_unicas))
                 
-                st.write(f"✅ {len(coords_cache)} cidades mapeadas.")
-                
-                # PASSO 3: Cálculo de Rotas
-                st.write("🚚 Calculando distâncias rodoviárias...")
+                st.write("🚚 Calculando rotas e custos...")
                 
                 def aplicar_rota(row):
                     uni = str(row.get('Unidade', '')).strip()
                     coords_origem = coords_cache.get(uni)
-                    
                     if coords_origem:
                         coords_dest = (loc_dest.latitude, loc_dest.longitude)
                         cam, km = buscar_rota_real(coords_origem, coords_dest)
@@ -171,33 +165,39 @@ if not st.session_state.base.empty:
                 if not validos.empty:
                     venc = validos.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
                     st.session_state.resultado = {'venc': venc, 'dest': (loc_dest.latitude, loc_dest.longitude)}
-                    
-                    # Finaliza o status com sucesso
-                    status.update(label="Cálculo Concluído!", state="complete", expanded=False)
+                    status.update(label="Cálculo Finalizado!", state="complete", expanded=False)
                 else:
-                    status.update(label="Erro: Nenhuma rota válida", state="error")
-                    st.error("Não foi possível traçar rotas válidas.")
+                    status.update(label="Sem rotas válidas", state="error")
+                    st.error("Nenhuma rota encontrada.")
             else:
                 status.update(label="Erro no Destino", state="error")
-                st.error(f"Não conseguimos localizar a cidade '{destino}'.")
+                st.error("Cidade não encontrada.")
 
-    # --- MAPA ---
+    # --- RESULTADOS COM FINANCEIRO ---
     if st.session_state.resultado:
         res = st.session_state.resultado
         v = res['venc']
         cor = "orange" if v['Ocupacao'] > 80 else "green"
 
-        st.info(f"🏆 Sugestão: **{v['Consultor']}** ({v['Unidade']})")
-        c1, c2 = st.columns(2)
-        c1.metric("Distância", f"{v['Distancia']:.1f} km")
+        # Cálculos Financeiros (Ida e Volta)
+        dist_total = v['Distancia'] * 2
+        litros_necessarios = dist_total / consumo_carro
+        custo_total = litros_necessarios * preco_combustivel
+
+        st.success(f"🏆 Melhor Opção: **{v['Consultor']}** ({v['Unidade']})")
+        
+        # Métricas em 3 colunas
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Distância (Só Ida)", f"{v['Distancia']:.1f} km")
         c2.metric("Ocupação", f"{v['Ocupacao']:.2f}%")
+        c3.metric("Custo Estimado (Ida+Volta)", f"R$ {custo_total:.2f}", help=f"Baseado em {dist_total:.1f}km totais")
 
         m = folium.Map(location=res['dest'], zoom_start=8)
         folium.Marker(res['dest'], tooltip="Cliente", icon=folium.Icon(color='red')).add_to(m)
         if v['Coords']:
-            folium.Marker(v['Coords'], tooltip=f"{v['Consultor']} - {v['Ocupacao']:.1f}%", icon=folium.Icon(color=cor, icon='user')).add_to(m)
+            folium.Marker(v['Coords'], tooltip=f"{v['Consultor']} | R$ {custo_total:.0f}", icon=folium.Icon(color=cor, icon='user')).add_to(m)
             if v['Trajeto']:
                 folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.7).add_to(m)
-        st_folium(m, width=1200, height=500, key="mapa_final_v39")
+        st_folium(m, width=1200, height=500, key="mapa_final_v40")
 else:
     st.info("💡 Carregue o ficheiro Excel.")
