@@ -30,20 +30,23 @@ if 'consultores_base' not in st.session_state:
 if 'resultado' not in st.session_state:
     st.session_state.resultado = None
 
-st.title("🤖 Agente de Logística: Planejamento V2.8")
+st.title("🤖 Agente de Logística: Planeamento V2.8")
 
 # --- BARRA LATERAL: GESTÃO ---
 with st.sidebar:
     st.header("📁 Gestão de Dados")
-    # Lembre-se: Arraste o arquivo .xlsx real, não o atalho .url
+    # Arraste o ficheiro .xlsx real
     arquivo_excel = st.file_uploader("Carregar Excel (.xlsx)", type=["xlsx"])
     
     if arquivo_excel:
         try:
-            st.session_state.consultores_base = pd.read_excel(arquivo_excel)
-            st.success("Excel carregado!")
+            df_input = pd.read_excel(arquivo_excel)
+            # LIMPEZA: Remove espaços extras nos nomes das colunas (ex: "Consultor " vira "Consultor")
+            df_input.columns = df_input.columns.astype(str).str.strip()
+            st.session_state.consultores_base = df_input
+            st.success("Excel carregado e colunas limpas!")
         except Exception as e:
-            st.error(f"Erro ao ler arquivo: {e}")
+            st.error(f"Erro ao ler ficheiro: {e}")
 
     mes_selecionado = None
     if not st.session_state.consultores_base.empty:
@@ -59,21 +62,24 @@ with st.sidebar:
         st.session_state.resultado = None
         st.rerun()
 
-# --- PROCESSAMENTO DOS DADOS ---
+# --- ÁREA DE PROCESSAMENTO ---
 if not st.session_state.consultores_base.empty:
     df_temp = st.session_state.consultores_base.copy()
     
-    # Ajuste dinâmico para os dados do seu Excel
+    # Validação da Coluna do Mês
     if mes_selecionado in df_temp.columns:
-        # Converte "52,38%" (string) para 52.38 (número)
+        # Trata formatos como "52,38%" para números
         df_temp['Ocupacao'] = df_temp[mes_selecionado].astype(str).str.replace('%', '').str.replace(',', '.').astype(float)
     else:
-        st.warning(f"Coluna {mes_selecionado} não encontrada.")
+        st.warning(f"Coluna '{mes_selecionado}' não encontrada no Excel.")
         df_temp['Ocupacao'] = 0.0
 
-    # FIX LINHA 98: Sintaxe corrigida para evitar o erro da imagem
+    # CORREÇÃO DA LINHA 98: Sintaxe fechada corretamente
     st.subheader(f"📋 Consultores Disponíveis - {mes_selecionado}")
-    st.dataframe(df_temp[['Consultor', 'Unidade', 'Ocupacao']], use_container_width=True)
+    
+    # Exibe apenas se as colunas existirem
+    cols_para_exibir = [c for c in ['Consultor', 'Unidade', 'Ocupacao'] if c in df_temp.columns]
+    st.dataframe(df_temp[cols_para_exibir], use_container_width=True)
 
     st.divider()
     destino = st.text_input("📍 Informe a Cidade de Destino:")
@@ -83,9 +89,9 @@ if not st.session_state.consultores_base.empty:
         loc_dest = geolocator.geocode(f"{destino}, RS, Brasil")
 
         if loc_dest:
-            with st.spinner("Traçando rotas reais..."):
+            with st.spinner("A traçar rotas reais pelas estradas..."):
                 def analisar(row):
-                    time.sleep(1.2) # Evita erro 403
+                    time.sleep(1.2) # Segurança API
                     l = geolocator.geocode(f"{row['Unidade']}, RS, Brasil")
                     if l:
                         origem = (l.latitude, l.longitude)
@@ -98,15 +104,15 @@ if not st.session_state.consultores_base.empty:
                 venc = df_temp.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
                 st.session_state.resultado = {'vencedor': venc, 'dest_coords': (loc_dest.latitude, loc_dest.longitude)}
         else:
-            st.error("Cidade não encontrada.")
+            st.error("Destino não localizado.")
 
-    # --- MAPA FINAL ---
+    # --- MAPA FINAL PERSISTENTE ---
     if st.session_state.resultado:
         res = st.session_state.resultado
         v = res['vencedor']
         cor = "orange" if v['Ocupacao'] > 80 else "green"
 
-        st.info(f"🏆 Melhor Sugestão: **{v['Consultor']}**")
+        st.info(f"🏆 Melhor Escolha: **{v['Consultor']}**")
         c1, c2 = st.columns(2)
         c1.metric("Distância Estrada", f"{v['Distancia']:.1f} km")
         c2.metric(f"Ocupação ({mes_selecionado})", f"{v['Ocupacao']:.1f}%")
@@ -118,6 +124,6 @@ if not st.session_state.consultores_base.empty:
             if v['Trajeto']:
                 folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.7).add_to(m)
 
-        st_folium(m, width=1200, height=500, key="mapa_v28")
+        st_folium(m, width=1200, height=500, key="mapa_v28_final")
 else:
-    st.info("💡 Arraste o seu arquivo Excel para começar.")
+    st.info("💡 Carrega o teu ficheiro Excel (.xlsx) para começar.")
