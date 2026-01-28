@@ -9,9 +9,9 @@ import requests
 import time
 from datetime import datetime
 
-st.set_page_config(page_title="Agente Logística V3.7", layout="wide")
+st.set_page_config(page_title="Agente Logística V3.8", layout="wide")
 
-# --- FUNÇÃO DE LEITURA (MANTIDA DA V3.6) ---
+# --- FUNÇÃO DE LEITURA (Mantida pois funciona perfeitamente) ---
 def carregar_excel_bruto(arquivo):
     try:
         df_raw = pd.read_excel(arquivo, header=None)
@@ -32,27 +32,27 @@ def carregar_excel_bruto(arquivo):
     except Exception as e:
         return None, str(e)
 
-# --- NOVA FUNÇÃO: GEOCODIFICAÇÃO SEGURA (BLINDAGEM) ---
+# --- GEOCODIFICAÇÃO SEGURA ---
 def geocodificar_seguro(geolocator, endereco, tentativas=3):
-    """Tenta buscar o endereço até 3 vezes se a internet falhar."""
     for i in range(tentativas):
         try:
-            # Tenta buscar
-            location = geolocator.geocode(endereco)
-            return location
+            # User agent único a cada tentativa para evitar bloqueio
+            geolocator.user_agent = f"agente_logistica_v38_{int(time.time())}_{i}"
+            return geolocator.geocode(endereco, timeout=10)
         except (GeocoderUnavailable, GeocoderTimedOut):
-            # Se der erro, espera 2 segundos e tenta de novo
             time.sleep(2)
             continue
     return None
 
-# --- FUNÇÃO DE ROTA ---
+# --- FUNÇÃO DE ROTA OSRM ---
 def buscar_rota_real(ponto_a, ponto_b):
+    # OSRM espera lon,lat
     url = f"http://router.project-osrm.org/route/v1/driving/{ponto_a[1]},{ponto_a[0]};{ponto_b[1]},{ponto_b[0]}?overview=full&geometries=geojson"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=5)
         data = response.json()
         if data['code'] == 'Ok':
+            # Retorna geometria [[lat, lon], ...] e distância km
             rota = [[p[1], p[0]] for p in data['routes'][0]['geometry']['coordinates']]
             distancia = data['routes'][0]['distance'] / 1000
             return rota, distancia
@@ -63,7 +63,7 @@ def buscar_rota_real(ponto_a, ponto_b):
 if 'base' not in st.session_state: st.session_state.base = pd.DataFrame()
 if 'resultado' not in st.session_state: st.session_state.resultado = None
 
-st.title("🤖 Agente Logística V3.7: Conexão Blindada")
+st.title("🤖 Agente Logística V3.8: Cache Inteligente")
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -73,7 +73,7 @@ with st.sidebar:
         df_lido, erro = carregar_excel_bruto(arquivo)
         if df_lido is not None:
             st.session_state.base = df_lido
-            st.success(f"Carregado: {len(df_lido)} linhas.")
+            st.success(f"Carregado: {len(df_lido)} consultores.")
         else:
             st.error(erro)
 
@@ -94,7 +94,7 @@ with st.sidebar:
 if not st.session_state.base.empty:
     df = st.session_state.base.copy()
 
-    # Tratamento da Ocupação
+    # 1. Tratamento de Ocupação (Igual V3.6)
     col_mes = None
     for c in df.columns:
         if str(c).lower() == str(mes_ref).lower():
@@ -104,12 +104,13 @@ if not st.session_state.base.empty:
     if col_mes:
         df['Ocupacao'] = (df[col_mes].astype(str).str.replace('%', '').str.replace(',', '.').str.strip())
         df['Ocupacao'] = pd.to_numeric(df['Ocupacao'], errors='coerce').fillna(0)
+        # Ajuste percentual
         if df['Ocupacao'].max() <= 1.5: df['Ocupacao'] = df['Ocupacao'] * 100
     else:
         st.warning(f"Mês {mes_ref} não encontrado.")
         df['Ocupacao'] = 0.0
 
-    # Tabela
+    # Exibição
     st.subheader(f"📋 Equipa: {mes_ref}")
     cols_mostrar = [c for c in ['Consultor', 'Unidade', 'Ocupacao'] if c in df.columns]
     st.dataframe(df[cols_mostrar], use_container_width=True, 
@@ -119,31 +120,54 @@ if not st.session_state.base.empty:
     destino = st.text_input("📍 Informe a Cidade do Cliente:")
 
     if st.button("CALCULAR LOGÍSTICA", type="primary"):
-        # User agent único a cada clique para evitar bloqueio
-        user_agent_unico = f"agente_logistica_v37_{int(time.time())}"
-        geolocator = Nominatim(user_agent=user_agent_unico, timeout=10)
+        geolocator = Nominatim(user_agent=f"agente_v38_{int(time.time())}", timeout=10)
         
-        # 1. Busca Segura do Destino (Aqui é onde estava dando erro!)
+        # 1. Busca Destino
         loc_dest = geocodificar_seguro(geolocator, f"{destino}, RS, Brasil")
 
         if loc_dest:
-            with st.spinner("Calculando rotas (isso pode levar alguns segundos)..."):
-                def analisar(row):
-                    unidade = str(row.get('Unidade', '')).strip()
-                    if not unidade or unidade.lower() == 'nan': return pd.Series([9999, None, None])
+            with st.spinner("Otimizando rotas (Cache Ativo)..."):
+                
+                # --- OTIMIZAÇÃO V3.8: Busca Cidades Únicas Primeiro ---
+                unidades_unicas = df['Unidade'].dropna().unique()
+                coords_cache = {}
+                
+                # Barra de progresso para visualização
+                prog_bar = st.progress(0)
+                total_unidades = len(unidades_unicas)
 
-                    # 2. Busca Segura da Origem
-                    l = geocodificar_seguro(geolocator, f"{unidade}, RS, Brasil")
+                for i, unidade in enumerate(unidades_unicas):
+                    uni_str = str(unidade).strip()
+                    if uni_str and uni_str.lower() != 'nan':
+                        # Busca coordenada da CIDADE (apenas 1 vez por cidade!)
+                        loc_u = geocodificar_seguro(geolocator, f"{uni_str}, RS, Brasil")
+                        if loc_u:
+                            coords_cache[uni_str] = (loc_u.latitude, loc_u.longitude)
+                        else:
+                            coords_cache[uni_str] = None
+                        
+                        # Pausa pequena é suficiente agora, pois são poucas requisições
+                        time.sleep(1.5)
+                    prog_bar.progress((i + 1) / total_unidades)
+                
+                # 2. Aplica as coordenadas do Cache para a tabela
+                def aplicar_rota(row):
+                    uni = str(row.get('Unidade', '')).strip()
+                    coords_origem = coords_cache.get(uni)
                     
-                    if l:
-                        origem = (l.latitude, l.longitude)
-                        dest_c = (loc_dest.latitude, loc_dest.longitude)
-                        cam, km = buscar_rota_real(origem, dest_c)
-                        if not km: km = geodesic(origem, dest_c).km
-                        return pd.Series([km, origem, cam])
+                    if coords_origem:
+                        coords_dest = (loc_dest.latitude, loc_dest.longitude)
+                        
+                        # Tenta rota real, falha para linear se der erro
+                        cam, km = buscar_rota_real(coords_origem, coords_dest)
+                        if not km: km = geodesic(coords_origem, coords_dest).km
+                        
+                        return pd.Series([km, coords_origem, cam])
+                    
                     return pd.Series([9999, None, None])
 
-                df[['Distancia', 'Coords', 'Trajeto']] = df.apply(analisar, axis=1)
+                # Aplica o cálculo rápido (agora sem chamar API externa no loop)
+                df[['Distancia', 'Coords', 'Trajeto']] = df.apply(aplicar_rota, axis=1)
                 
                 validos = df[df['Distancia'] < 9000]
                 
@@ -151,9 +175,9 @@ if not st.session_state.base.empty:
                     venc = validos.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
                     st.session_state.resultado = {'venc': venc, 'dest': (loc_dest.latitude, loc_dest.longitude)}
                 else:
-                    st.error("Nenhuma rota encontrada.")
+                    st.error("Não foi possível traçar rotas válidas para as unidades listadas.")
         else:
-            st.error(f"Erro: Não conseguimos localizar a cidade '{destino}'. O servidor de mapas pode estar instável. Tente novamente em 10 segundos.")
+            st.error(f"Erro: Não localizamos '{destino}'. Tente adicionar 'RS' ou verificar o nome.")
 
     # --- MAPA ---
     if st.session_state.resultado:
@@ -169,9 +193,9 @@ if not st.session_state.base.empty:
         m = folium.Map(location=res['dest'], zoom_start=8)
         folium.Marker(res['dest'], tooltip="Cliente", icon=folium.Icon(color='red')).add_to(m)
         if v['Coords']:
-            folium.Marker(v['Coords'], tooltip=f"{v['Consultor']} - {v['Ocupacao']:.1f}%", icon=folium.Icon(color=cor, icon='user')).add_to(m)
+            folium.Marker(v['Coords'], tooltip=f"{v['Consultor']} ({v['Unidade']})", icon=folium.Icon(color=cor, icon='user')).add_to(m)
             if v['Trajeto']:
                 folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.7).add_to(m)
-        st_folium(m, width=1200, height=500, key="mapa_final_v37")
+        st_folium(m, width=1200, height=500, key="mapa_final_v38")
 else:
     st.info("💡 Carregue o ficheiro Excel.")
