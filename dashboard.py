@@ -8,102 +8,124 @@ import requests
 import time
 from datetime import datetime
 
-st.set_page_config(page_title="Agente Logística V3.1", layout="wide")
+# Configuração da Página para evitar o erro de largura
+st.set_page_config(page_title="Agente Logística V3.2", layout="wide")
+
+# --- FUNÇÃO DE ROTA REAL ---
+def buscar_rota_real(ponto_a, ponto_b):
+    url = f"http://router.project-osrm.org/route/v1/driving/{ponto_a[1]},{ponto_a[0]};{ponto_b[1]},{ponto_b[0]}?overview=full&geometries=geojson"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if data['code'] == 'Ok':
+            rota = [[p[1], p[0]] for p in data['routes'][0]['geometry']['coordinates']]
+            distancia = data['routes'][0]['distance'] / 1000
+            return rota, distancia
+    except:
+        return None, None
 
 # --- MEMÓRIA DA SESSÃO ---
-if 'consultores_base' not in st.session_state:
-    st.session_state.consultores_base = pd.DataFrame()
+if 'base' not in st.session_state:
+    st.session_state.base = pd.DataFrame()
 if 'resultado' not in st.session_state:
     st.session_state.resultado = None
 
-st.title("🤖 Agente de Logística: Painel Completo V3.1")
+st.title("🤖 Agente de Logística: Painel de Precisão V3.2")
 
-# --- BARRA LATERAL: IMPORTAÇÃO ---
+# --- BARRA LATERAL: GESTÃO ---
 with st.sidebar:
     st.header("📁 Gestão de Dados")
-    # Lembrete: Carregue o .xlsx real, não o atalho .url
-    arquivo_excel = st.file_uploader("Carregar Excel (.xlsx)", type=["xlsx"])
+    # Lembrete: Arraste o .xlsx real, não o atalho .url
+    arquivo = st.file_uploader("Carregar Excel (.xlsx)", type=["xlsx"])
     
-    if arquivo_excel:
+    if arquivo:
         try:
-            # Lê o Excel e limpa espaços extras nos nomes das colunas
-            df_input = pd.read_excel(arquivo_excel)
+            df_input = pd.read_excel(arquivo)
+            # LIMPEZA: Remove espaços nos nomes das colunas e garante que são strings
             df_input.columns = df_input.columns.astype(str).str.strip()
-            
-            # Remove linhas que repetem o cabeçalho ou estão vazias
-            df_input = df_input[df_input['Consultor'] != 'Consultor'].dropna(subset=['Consultor'])
-            
-            st.session_state.consultores_base = df_input
-            st.success("Excel carregado e colunas sincronizadas!")
+            # Remove linhas vazias ou repetidas
+            df_input = df_input.dropna(subset=['Consultor'])
+            st.session_state.base = df_input
+            st.success("Dados sincronizados com sucesso!")
         except Exception as e:
             st.error(f"Erro ao ler arquivo: {e}")
 
-    mes_selecionado = None
-    if not st.session_state.consultores_base.empty:
+    mes_ref = None
+    if not st.session_state.base.empty:
         st.divider()
-        st.header("🗓️ Mês de Referência")
         lista_meses = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 
                        'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
         mes_atual_idx = datetime.now().month - 1
-        mes_selecionado = st.selectbox("Selecione o mês:", options=lista_meses, index=mes_atual_idx)
+        mes_ref = st.selectbox("Selecione o Mês:", options=lista_meses, index=mes_atual_idx)
 
-    if st.button("Limpar Tudo"):
-        st.session_state.consultores_base = pd.DataFrame()
+    if st.button("Limpar Sistema"):
+        st.session_state.base = pd.DataFrame()
         st.session_state.resultado = None
         st.rerun()
 
-# --- ÁREA DA TABELA E CÁLCULOS ---
-if not st.session_state.consultores_base.empty:
-    df_temp = st.session_state.consultores_base.copy()
+# --- EXIBIÇÃO DA TABELA COMPLETA ---
+if not st.session_state.base.empty:
+    df_temp = st.session_state.base.copy()
     
-    # TRATAMENTO DE DADOS: Transforma "52,38%" em número real
-    if mes_selecionado in df_temp.columns:
-        df_temp['Ocupacao'] = df_temp[mes_selecionado].astype(str).str.replace('%', '').str.replace(',', '.').astype(float)
+    # 1. TRATAMENTO DA OCUPAÇÃO (Mês Selecionado)
+    if mes_ref in df_temp.columns:
+        # Transforma "52,38%" (texto) em 52.38 (número)
+        df_temp['Ocupacao'] = df_temp[mes_ref].astype(str).str.replace('%', '').str.replace(',', '.').astype(float)
     else:
-        st.warning(f"Coluna '{mes_selecionado}' não encontrada no Excel.")
+        st.warning(f"Coluna {mes_ref} não encontrada. Usando 0%.")
         df_temp['Ocupacao'] = 0.0
 
-    # FIX LINHA 98: Sintaxe corrigida para evitar o erro de SyntaxError
-    st.subheader(f"📋 Consultores Disponíveis - {mes_selecionado}")
+    # 2. TABELA COM CONSULTOR, UNIDADE E OCUPAÇÃO
+    # FIX: Subheader com f-string corrigido (sem SyntaxError)
+    st.subheader(f"📋 Equipa: {mes_ref}")
     
-    # Exibe especificamente as colunas desejadas
-    colunas_finais = ['Consultor', 'Unidade', 'Ocupacao']
-    # Garante que as colunas existem antes de exibir para evitar erros de KeyError
-    colunas_para_exibir = [c for c in colunas_finais if c in df_temp.columns]
-    
-    st.dataframe(df_temp[colunas_para_exibir], use_container_width=True)
+    # Selecionamos apenas as 3 colunas que você quer ver
+    cols_vistas = ['Consultor', 'Unidade', 'Ocupacao']
+    st.dataframe(df_temp[cols_vistas], use_container_width=True)
 
     st.divider()
-    destino = st.text_input("📍 Informe a Cidade de Destino:")
+    destino = st.text_input("📍 Informe a Cidade do Cliente (RS):")
 
     if st.button("CALCULAR MELHOR LOGÍSTICA", type="primary"):
-        geolocator = Nominatim(user_agent=f"agente_v31_{int(time.time())}", timeout=20)
+        geolocator = Nominatim(user_agent=f"agente_v32_{int(time.time())}", timeout=20)
         loc_dest = geolocator.geocode(f"{destino}, RS, Brasil")
 
         if loc_dest:
-            with st.spinner("Analisando rotas reais..."):
+            with st.spinner("Calculando rotas reais pelas estradas..."):
                 def analisar(row):
-                    time.sleep(1.2)
+                    time.sleep(1.2) # Segurança do Geopy
                     l = geolocator.geocode(f"{row['Unidade']}, RS, Brasil")
                     if l:
                         origem = (l.latitude, l.longitude)
                         dest_c = (loc_dest.latitude, loc_dest.longitude)
-                        # Cálculo de distância simples para garantir a funcionalidade
-                        dist = geodesic(origem, dest_c).km
-                        return pd.Series([dist, origem])
-                    return pd.Series([9999, None])
+                        cam, km = buscar_rota_real(origem, dest_c)
+                        if not km: km = geodesic(origem, dest_c).km
+                        return pd.Series([km, origem, cam])
+                    return pd.Series([9999, None, None])
 
-                df_temp[['Distancia', 'Coords']] = df_temp.apply(analisar, axis=1)
+                df_temp[['Distancia', 'Coords', 'Trajeto']] = df_temp.apply(analisar, axis=1)
                 venc = df_temp.sort_values(by=['Ocupacao', 'Distancia']).iloc[0]
-                st.session_state.resultado = {'vencedor': venc, 'dest_coords': (loc_dest.latitude, loc_dest.longitude)}
+                st.session_state.resultado = {'venc': venc, 'dest': (loc_dest.latitude, loc_dest.longitude)}
         else:
-            st.error("Cidade não localizada.")
+            st.error("Destino não localizado.")
 
-    # --- RESULTADOS ---
+    # --- RESULTADOS E MAPA ---
     if st.session_state.resultado:
         res = st.session_state.resultado
-        v = res['vencedor']
-        st.success(f"🏆 Melhor Sugestão: **{v['Consultor']}** ({v['Unidade']})")
-        st.metric("Distância", f"{v['Distancia']:.1f} km")
+        v = res['venc']
+        cor = "orange" if v['Ocupacao'] > 80 else "green"
+
+        st.info(f"🏆 Sugestão: **{v['Consultor']}** ({v['Unidade']})")
+        c1, c2 = st.columns(2)
+        c1.metric("Distância Real", f"{v['Distancia']:.1f} km")
+        c2.metric(f"Ocupação ({mes_ref})", f"{v['Ocupacao']:.1f}%")
+
+        m = folium.Map(location=res['dest'], zoom_start=8)
+        folium.Marker(res['dest'], tooltip="Cliente", icon=folium.Icon(color='red')).add_to(m)
+        if v['Coords']:
+            folium.Marker(v['Coords'], tooltip=v['Unidade'], icon=folium.Icon(color=cor, icon='user')).add_to(m)
+            if v['Trajeto']:
+                folium.PolyLine(v['Trajeto'], color="blue", weight=5, opacity=0.7).add_to(m)
+        st_folium(m, width=1200, height=500, key="mapa_final")
 else:
-    st.info("💡 Arraste o arquivo Excel para a lateral para visualizar a tabela.")
+    st.info("💡 Carregue o arquivo Excel na lateral para visualizar a tabela completa.")
